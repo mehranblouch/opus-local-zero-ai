@@ -1,19 +1,23 @@
 import os
+import gc
 import json
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Callable
 
 class SpeechTranscriber:
-    def __init__(self, model_size: str = "base"):
-        self.model_size = model_size
+    def __init__(self, model_size: str = "tiny"):
+        # "tiny" uses only ~150MB RAM (perfect for 512MB Railway memory limits & 5x faster!)
+        self.model_size = os.environ.get("WHISPER_MODEL", model_size)
         self._model = None
 
     def load_model(self):
         if self._model is None:
             import whisper
             import torch
+            # Limit thread allocation to prevent memory spikes on cloud containers
+            torch.set_num_threads(2)
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            print(f"[SpeechTranscriber] Loading Whisper '{self.model_size}' model on {device}...")
+            print(f"[SpeechTranscriber] Loading Whisper '{self.model_size}' model on {device} (Low-Memory Mode)...")
             self._model = whisper.load_model(self.model_size, device=device)
         return self._model
 
@@ -33,14 +37,17 @@ class SpeechTranscriber:
             progress_callback(f"Transcribing audio with Whisper AI ({self.model_size})...", 25)
 
         try:
+            import torch
             model = self.load_model()
             
-            # Run whisper transcription with word timestamps enabled
-            result = model.transcribe(
-                audio_path,
-                word_timestamps=True,
-                verbose=False
-            )
+            # Run whisper with low-memory inference mode
+            with torch.inference_mode():
+                result = model.transcribe(
+                    audio_path,
+                    word_timestamps=True,
+                    verbose=False,
+                    fp16=False # CPU-friendly
+                )
 
             segments = []
             raw_segments = result.get("segments", [])
@@ -65,7 +72,7 @@ class SpeechTranscriber:
                             "probability": round(w.get("probability", 1.0), 2)
                         })
                 else:
-                    # Synthesize approximate word timing if word_timestamps was not supported
+                    # Synthesize approximate word timing
                     words_list = seg_data["text"].split()
                     if words_list:
                         dur = (seg_data["end"] - seg_data["start"]) / len(words_list)
@@ -80,6 +87,9 @@ class SpeechTranscriber:
                             cur += dur
 
                 segments.append(seg_data)
+
+            # Clean memory immediately
+            gc.collect()
 
             # Cache transcript
             with open(cache_path, "w", encoding="utf-8") as f:

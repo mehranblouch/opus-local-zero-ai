@@ -25,7 +25,7 @@ CORS(app)
 jobs = {}
 
 downloader = VideoDownloader(download_dir=str(DOWNLOADS_DIR))
-transcriber = SpeechTranscriber(model_size="base")
+transcriber = SpeechTranscriber(model_size="tiny")
 renderer = ShortsRenderer(output_dir=str(OUTPUT_DIR))
 
 def process_video_job(job_id: str, url: str, min_dur: float, max_dur: float, max_clips: int, layout: str, caption_style: str):
