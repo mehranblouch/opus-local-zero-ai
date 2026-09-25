@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
 from pipeline.downloader import VideoDownloader
 from pipeline.transcriber import SpeechTranscriber
@@ -19,6 +20,7 @@ DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024 # 500 MB max upload
 CORS(app)
 
 # In-memory job state tracker
@@ -28,7 +30,7 @@ downloader = VideoDownloader(download_dir=str(DOWNLOADS_DIR))
 transcriber = SpeechTranscriber(model_size="tiny")
 renderer = ShortsRenderer(output_dir=str(OUTPUT_DIR))
 
-def process_video_job(job_id: str, url: str, min_dur: float, max_dur: float, max_clips: int, layout: str, caption_style: str):
+def process_video_job(job_id: str, url_or_path: str, min_dur: float, max_dur: float, max_clips: int, layout: str, caption_style: str, is_local_file: bool = False):
     job = jobs[job_id]
     
     def update_progress(msg: str, pct: float):
@@ -37,28 +39,42 @@ def process_video_job(job_id: str, url: str, min_dur: float, max_dur: float, max
         job["progress"] = round(pct, 1)
 
     try:
-        # Step 1: Download Video & Extract Audio
-        update_progress("Downloading YouTube video...", 5)
-        video_info = downloader.download(url, progress_callback=update_progress)
+        # Step 1: Video & Audio Preparation
+        if is_local_file:
+            update_progress("Processing uploaded video...", 5)
+            video_path = url_or_path
+            filename = Path(video_path).stem
+            audio_path = str(DOWNLOADS_DIR / f"{filename}.mp3")
+            downloader.extract_audio(video_path, audio_path)
+            video_info = {
+                "title": filename,
+                "video_path": video_path,
+                "audio_path": audio_path,
+                "duration": 0
+            }
+        else:
+            update_progress("Connecting to YouTube video stream...", 5)
+            video_info = downloader.download(url_or_path, progress_callback=update_progress)
+
         job["video_info"] = {
-            "title": video_info.get("title", ""),
+            "title": video_info.get("title", "Video"),
             "thumbnail": video_info.get("thumbnail", ""),
             "duration": video_info.get("duration", 0),
             "uploader": video_info.get("uploader", "")
         }
 
-        # Step 2: Transcribe Speech with Local Whisper (No API key needed!)
-        update_progress("Transcribing speech with local Whisper AI...", 25)
+        # Step 2: Transcribe Speech with Local Whisper AI
+        update_progress("Transcribing speech with Whisper AI...", 25)
         segments = transcriber.transcribe(video_info["audio_path"], progress_callback=update_progress)
         job["segments_count"] = len(segments)
 
         # Step 3: Analyze & Find Viral Highlights
-        update_progress("Analyzing transcript for viral hooks & moments...", 55)
+        update_progress("Detecting viral hooks & engaging segments...", 55)
         analyzer = ViralClipAnalyzer(min_duration=min_dur, max_duration=max_dur, max_clips=max_clips)
         clips = analyzer.analyze(segments)
 
         if not clips:
-            raise RuntimeError("No suitable highlight clips could be generated from this video.")
+            raise RuntimeError("No speech highlight segments met the duration criteria.")
 
         # Step 4: Render Vertical 9:16 Shorts with Captions
         rendered_clips = []
@@ -117,7 +133,7 @@ def start_process():
     min_dur = float(data.get("min_duration", 20))
     max_dur = float(data.get("max_duration", 60))
     max_clips = int(data.get("max_clips", 5))
-    layout = data.get("layout", "blur") # "blur" or "crop"
+    layout = data.get("layout", "blur")
     caption_style = data.get("caption_style", "mrbeast")
 
     job_id = str(uuid.uuid4())[:8]
@@ -132,7 +148,45 @@ def start_process():
 
     thread = threading.Thread(
         target=process_video_job,
-        args=(job_id, url, min_dur, max_dur, max_clips, layout, caption_style),
+        args=(job_id, url, min_dur, max_dur, max_clips, layout, caption_style, False),
+        daemon=True
+    )
+    thread.start()
+
+    return jsonify({"job_id": job_id, "status": "queued"})
+
+@app.route("/api/upload", methods=["POST"])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    filename = secure_filename(file.filename)
+    job_id = str(uuid.uuid4())[:8]
+    saved_path = str(DOWNLOADS_DIR / f"{job_id}_{filename}")
+    file.save(saved_path)
+
+    min_dur = float(request.form.get("min_duration", 20))
+    max_dur = float(request.form.get("max_duration", 60))
+    max_clips = int(request.form.get("max_clips", 5))
+    layout = request.form.get("layout", "blur")
+    caption_style = request.form.get("caption_style", "mrbeast")
+
+    jobs[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "message": "Initializing video upload...",
+        "created_at": time.time(),
+        "clips": []
+    }
+
+    thread = threading.Thread(
+        target=process_video_job,
+        args=(job_id, saved_path, min_dur, max_dur, max_clips, layout, caption_style, True),
         daemon=True
     )
     thread.start()

@@ -1,7 +1,14 @@
 document.addEventListener('DOMContentLoaded', () => {
+  const tabUrlBtn = document.getElementById('tab-url-btn');
+  const tabUploadBtn = document.getElementById('tab-upload-btn');
+  const urlInputBlock = document.getElementById('url-input-block');
+  const uploadInputBlock = document.getElementById('upload-input-block');
+
   const form = document.getElementById('generate-form');
   const submitBtn = document.getElementById('submit-btn');
+  const uploadSubmitBtn = document.getElementById('upload-submit-btn');
   const videoUrlInput = document.getElementById('video-url');
+  const videoFileInput = document.getElementById('video-file');
   const durationSelect = document.getElementById('duration-select');
   const maxClipsSelect = document.getElementById('max-clips');
   const layoutSelect = document.getElementById('layout-select');
@@ -22,28 +29,55 @@ document.addEventListener('DOMContentLoaded', () => {
   const clipsGrid = document.getElementById('clips-grid');
   const downloadAllBtn = document.getElementById('download-all-btn');
 
+  let activeMode = 'url'; // 'url' or 'upload'
   let pollInterval = null;
+
+  // Tab switching
+  tabUrlBtn.addEventListener('click', () => {
+    activeMode = 'url';
+    tabUrlBtn.classList.add('active');
+    tabUploadBtn.classList.remove('active');
+    urlInputBlock.classList.remove('hidden');
+    uploadInputBlock.classList.add('hidden');
+    stepDownload.textContent = '1. Download';
+  });
+
+  tabUploadBtn.addEventListener('click', () => {
+    activeMode = 'upload';
+    tabUploadBtn.classList.add('active');
+    tabUrlBtn.classList.remove('active');
+    uploadInputBlock.classList.remove('hidden');
+    urlInputBlock.classList.add('hidden');
+    stepDownload.textContent = '1. Process Audio';
+  });
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-
-    const url = videoUrlInput.value.trim();
-    if (!url) return;
 
     const [minDur, maxDur] = durationSelect.value.split('-').map(Number);
     const maxClips = parseInt(maxClipsSelect.value, 10);
     const layout = layoutSelect.value;
     const captionStyle = captionStyleSelect.value;
 
-    // Reset and show progress
-    submitBtn.disabled = true;
-    submitBtn.innerHTML = `<span>Processing...</span>`;
-    progressContainer.classList.remove('hidden');
-    resultsSection.classList.add('hidden');
-    clipsGrid.innerHTML = '';
-    updateProgressUI('Connecting to local AI pipeline...', 2);
-    resetSteps();
+    if (activeMode === 'url') {
+      const url = videoUrlInput.value.trim();
+      if (!url) {
+        alert('Please enter a YouTube video URL.');
+        return;
+      }
+      processUrl(url, minDur, maxDur, maxClips, layout, captionStyle);
+    } else {
+      const file = videoFileInput.files[0];
+      if (!file) {
+        alert('Please select a video file (.mp4, .mov, etc.) to upload.');
+        return;
+      }
+      processFileUpload(file, minDur, maxDur, maxClips, layout, captionStyle);
+    }
+  });
 
+  async function processUrl(url, minDur, maxDur, maxClips, layout, captionStyle) {
+    setProcessingUI('Connecting to AI pipeline...');
     try {
       const response = await fetch('/api/process', {
         method: 'POST',
@@ -59,20 +93,48 @@ document.addEventListener('DOMContentLoaded', () => {
       });
 
       const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to start video processing');
-      }
-
-      const jobId = data.job_id;
-      startPolling(jobId);
-
+      if (!response.ok) throw new Error(data.error || 'Failed to start video processing');
+      startPolling(data.job_id);
     } catch (err) {
-      alert('Error: ' + err.message);
-      resetSubmitButton();
-      progressContainer.classList.add('hidden');
+      handleError(err.message);
     }
-  });
+  }
+
+  async function processFileUpload(file, minDur, maxDur, maxClips, layout, captionStyle) {
+    setProcessingUI('Uploading video file to server...');
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('min_duration', minDur);
+    formData.append('max_duration', maxDur);
+    formData.append('max_clips', maxClips);
+    formData.append('layout', layout);
+    formData.append('caption_style', captionStyle);
+
+    try {
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to upload video');
+      startPolling(data.job_id);
+    } catch (err) {
+      handleError(err.message);
+    }
+  }
+
+  function setProcessingUI(msg) {
+    submitBtn.disabled = true;
+    uploadSubmitBtn.disabled = true;
+    submitBtn.innerHTML = `<span>Processing...</span>`;
+    uploadSubmitBtn.innerHTML = `<span>Uploading...</span>`;
+    progressContainer.classList.remove('hidden');
+    resultsSection.classList.add('hidden');
+    clipsGrid.innerHTML = '';
+    updateProgressUI(msg, 2);
+    resetSteps();
+  }
 
   function startPolling(jobId) {
     if (pollInterval) clearInterval(pollInterval);
@@ -88,14 +150,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (job.status === 'completed') {
           clearInterval(pollInterval);
-          resetSubmitButton();
+          resetButtons();
           renderResults(job);
         } else if (job.status === 'failed') {
           clearInterval(pollInterval);
-          resetSubmitButton();
-          alert('Processing Error: ' + (job.error || job.message));
-          progressMessage.textContent = '❌ ' + (job.error || 'Processing Failed');
-          progressMessage.style.color = '#ef4444';
+          handleError(job.error || job.message);
         }
       } catch (err) {
         console.error('Polling error:', err);
@@ -140,12 +199,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function resetSubmitButton() {
+  function handleError(errMsg) {
+    resetButtons();
+    progressMessage.textContent = '❌ ' + errMsg;
+    progressMessage.style.color = '#ef4444';
+    alert('Error: ' + errMsg);
+  }
+
+  function resetButtons() {
     submitBtn.disabled = false;
-    submitBtn.innerHTML = `
-      <span>Generate Shorts</span>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-    `;
+    uploadSubmitBtn.disabled = false;
+    submitBtn.innerHTML = `<span>Generate Shorts</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>`;
+    uploadSubmitBtn.innerHTML = `<span>Upload & Generate</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>`;
   }
 
   function renderResults(job) {
@@ -168,44 +233,23 @@ document.addEventListener('DOMContentLoaded', () => {
       card.className = 'clip-card';
 
       const viralityScore = clip.score || 85;
-      let badgeClass = 'score-high';
-      if (viralityScore < 70) badgeClass = 'score-mid';
-      if (viralityScore < 50) badgeClass = 'score-low';
-
       card.innerHTML = `
-        <div class="video-preview-wrapper">
+        <div class="video-player-box">
           <video src="${clip.video_url}" controls playsinline preload="metadata"></video>
-          <div class="virality-badge ${badgeClass}">
-            <span class="fire-icon">🔥</span>
-            <span>Virality Score: <strong>${viralityScore}/100</strong></span>
-          </div>
         </div>
-        <div class="clip-info">
-          <div class="clip-title-row">
-            <h3 class="clip-title">${escapeHtml(clip.title)}</h3>
-            <span class="clip-duration">${Math.round(clip.duration)}s</span>
-          </div>
-          
-          <div class="score-breakdown">
-            <div class="score-item">
-              <span class="label">Hook</span>
-              <span class="val">${clip.hook_score || 85}%</span>
-            </div>
-            <div class="score-item">
-              <span class="label">Engagement</span>
-              <span class="val">${clip.engagement_score || 80}%</span>
-            </div>
-            <div class="score-item">
-              <span class="label">Pacing</span>
-              <span class="val">${clip.coherence_score || 90}%</span>
-            </div>
+        <div class="clip-content">
+          <div class="clip-badges">
+            <span class="badge-rank">#${clip.rank || (index + 1)}</span>
+            <span class="badge-score">🔥 Score: ${viralityScore}/100</span>
+            <span class="badge-dur">${Math.round(clip.duration)}s</span>
           </div>
 
-          <p class="clip-transcript-snippet">${escapeHtml(clip.text || '')}</p>
+          <h3 class="clip-title-text">${escapeHtml(clip.title)}</h3>
+          <p class="clip-text-snippet">${escapeHtml(clip.text || '')}</p>
 
           <a href="${clip.video_url}" download="${clip.filename}" class="btn-download">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            <span>Download Short MP4</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span>Download MP4</span>
           </a>
         </div>
       `;
