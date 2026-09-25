@@ -1,0 +1,23 @@
+{
+  "name": "opus-skills",
+  "version": "3.6.0",
+  "description": "Official OpusClip skill for AI coding agents — clip long videos and post to social",
+  "main": "skills/opusclip/scripts/opusclip",
+  "bin": {
+    "opusclip": "./skills/opusclip/scripts/opusclip"
+  },
+  "scripts": {
+    "start": "node ./skills/opusclip/scripts/opusclip",
+    "help": "node ./skills/opusclip/scripts/opusclip help",
+    "usage": "node ./skills/opusclip/scripts/opusclip usage"
+  },
+  "keywords": [
+    "opusclip",
+    "video",
+    "clips",
+    "ai",
+    "skills"
+  ],
+  "author": "OpusClip",
+  "license": "MIT"
+}

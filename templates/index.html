@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Opus Local — AI YouTube to Shorts Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="bg-glow"></div>
+
+  <!-- Navigation -->
+  <nav class="navbar">
+    <div class="logo">
+      <div class="logo-badge">PRO</div>
+      <span>Opus<strong>Local</strong></span>
+    </div>
+    <div class="nav-status">
+      <span class="status-dot"></span>
+      <span>100% Local AI (No API Keys)</span>
+    </div>
+  </nav>
+
+  <!-- Main Container -->
+  <main class="container">
+    <!-- Header -->
+    <header class="hero">
+      <div class="pill-tag">
+        <span class="sparkle">✨</span> 1 Long Video → 10 Viral Shorts in 1 Click
+      </div>
+      <h1>Turn Long YouTube Videos into <span>Viral Shorts</span></h1>
+      <p class="subtitle">AI speech transcription, viral hook detection, 9:16 vertical smart cropping, and karaoke captions — running completely on your own machine.</p>
+    </header>
+
+    <!-- Generator Box -->
+    <section class="generator-card">
+      <form id="generate-form">
+        <div class="input-wrapper">
+          <div class="input-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M22.54 6.42a2.78 2.78 0 0 0-1.94-2C18.88 4 12 4 12 4s-6.88 0-8.6.46a2.78 2.78 0 0 0-1.94 2A29 29 0 0 0 1 11.75a29 29 0 0 0 .46 5.33A2.78 2.78 0 0 0 3.4 19c1.72.46 8.6.46 8.6.46s6.88 0 8.6-.46a2.78 2.78 0 0 0 1.94-2 29 29 0 0 0 .46-5.25 29 29 0 0 0-.46-5.33z"></path>
+              <polygon points="9.75 15.02 15.5 11.75 9.75 8.48 9.75 15.02"></polygon>
+            </svg>
+          </div>
+          <input type="url" id="video-url" placeholder="Paste YouTube link here (e.g., https://www.youtube.com/watch?v=...)" required autocomplete="off">
+          <button type="submit" id="submit-btn" class="btn-primary">
+            <span>Generate Shorts</span>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </button>
+        </div>
+
+        <!-- Options / Settings Grid -->
+        <div class="options-grid">
+          <div class="option-item">
+            <label for="duration-select">Clip Duration</label>
+            <select id="duration-select">
+              <option value="20-60">Auto (20s - 60s)</option>
+              <option value="15-30">Short (15s - 30s)</option>
+              <option value="30-60">Medium (30s - 60s)</option>
+              <option value="60-90">Long (60s - 90s)</option>
+            </select>
+          </div>
+
+          <div class="option-item">
+            <label for="max-clips">Number of Clips</label>
+            <select id="max-clips">
+              <option value="3">Top 3 Clips</option>
+              <option value="5" selected>Top 5 Clips</option>
+              <option value="7">Top 7 Clips</option>
+            </select>
+          </div>
+
+          <div class="option-item">
+            <label for="layout-select">Layout Style</label>
+            <select id="layout-select">
+              <option value="blur" selected>Studio Blurred Background (Recommended)</option>
+              <option value="crop">Center Smart Crop</option>
+            </select>
+          </div>
+
+          <div class="option-item">
+            <label for="caption-style">Captions Theme</label>
+            <select id="caption-style">
+              <option value="mrbeast" selected>MrBeast (Yellow Highlight)</option>
+              <option value="neon">Cyber (Neon Green Highlight)</option>
+            </select>
+          </div>
+        </div>
+      </form>
+
+      <!-- Live Progress Bar Section -->
+      <div id="progress-container" class="progress-container hidden">
+        <div class="progress-header">
+          <span id="progress-message" class="progress-msg">Starting pipeline...</span>
+          <span id="progress-percent" class="progress-pct">0%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div id="progress-bar-fill" class="progress-bar-fill"></div>
+        </div>
+        <div class="steps-indicator">
+          <div class="step-badge active" id="step-download">1. Download</div>
+          <div class="step-badge" id="step-whisper">2. Transcribe</div>
+          <div class="step-badge" id="step-analyze">3. Hook Detection</div>
+          <div class="step-badge" id="step-render">4. 9:16 Render</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Results Section -->
+    <section id="results-section" class="results-section hidden">
+      <div class="results-header">
+        <div>
+          <h2>Generated Shorts</h2>
+          <p id="video-source-title" class="source-title"></p>
+        </div>
+        <button id="download-all-btn" class="btn-secondary hidden">Download All</button>
+      </div>
+
+      <div id="clips-grid" class="clips-grid">
+        <!-- Rendered clip cards inserted dynamically via JS -->
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>Opus Local · 100% Free & Open Source · No API Keys · Deployable to Railway / Docker</p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,549 @@
+#!/usr/bin/env node
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+const { execSync, spawn } = require("child_process");
+
+const VERSION = "3.6.0";
+const BASE_URL = process.env.OPUSCLIP_API_BASE_URL || "https://api.opus.pro/api";
+const WEB_ORIGIN = process.env.OPUSCLIP_WEB_ORIGIN || "https://clip.opus.pro";
+
+function getApiKey() {
+  const key = process.env.OPUSCLIP_API_KEY;
+  if (!key) {
+    console.error(JSON.stringify({
+      error: "OPUSCLIP_API_KEY environment variable is not set. Get your key from https://clip.opus.pro/dashboard (Enterprise, Pro, or Max plan required)."
+    }, null, 2));
+    process.exit(1);
+  }
+  return key;
+}
+
+async function apiRequest(endpoint, options = {}) {
+  const apiKey = getApiKey();
+  const url = endpoint.startsWith("http") ? endpoint : `${BASE_URL}${endpoint}`;
+  const headers = {
+    "Authorization": `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+    ...(options.headers || {})
+  };
+
+  const config = {
+    method: options.method || "GET",
+    headers
+  };
+
+  if (options.body) {
+    config.body = typeof options.body === "string" ? options.body : JSON.stringify(options.body);
+  }
+
+  try {
+    const res = await fetch(url, config);
+    const contentType = res.headers.get("content-type") || "";
+    let data;
+    if (contentType.includes("application/json")) {
+      data = await res.json();
+    } else {
+      data = await res.text();
+    }
+
+    if (!res.ok) {
+      const err = new Error(typeof data === "object" && data.message ? data.message : `HTTP ${res.status}: ${res.statusText}`);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  } catch (err) {
+    if (err.data) {
+      console.error(JSON.stringify(err.data, null, 2));
+    } else {
+      console.error(JSON.stringify({ error: err.message }, null, 2));
+    }
+    process.exit(1);
+  }
+}
+
+function parseArgs(args) {
+  const flags = {};
+  const positional = [];
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg.startsWith("--")) {
+      const key = arg.slice(2);
+      if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
+        flags[key] = args[i + 1];
+        i += 2;
+      } else {
+        flags[key] = true;
+        i++;
+      }
+    } else if (arg.startsWith("-")) {
+      const key = arg.slice(1);
+      if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+        flags[key] = args[i + 1];
+        i += 2;
+      } else {
+        flags[key] = true;
+        i++;
+      }
+    } else {
+      positional.push(arg);
+      i++;
+    }
+  }
+  return { flags, positional };
+}
+
+function printUsage() {
+  console.log(`opusclip/${VERSION} - Official OpusClip CLI
+
+Usage:
+  opusclip project create --url URL [options]   Submit video for clipping
+  opusclip project create --file PATH [options] Upload local video + create project
+  opusclip project list [--page N]              List the org's clip projects
+  opusclip project share --project ID           Share project publicly
+  opusclip project transcript --project ID      Get source-video transcript
+  opusclip project preview --project ID         Generate HTML preview and open in browser
+  opusclip clip list --project ID               List project clips
+  opusclip clip get --project ID --clip CID     Get clip details
+  opusclip clip export --project ID --clip CID  Get HD download URL
+  opusclip clip edit ops [options]              Named edit operations
+  opusclip clip edit get [options]              Get EditingScript JSON
+  opusclip clip edit apply [options]            Apply EditingScript JSON
+  opusclip clip edit censor [options]           Censor profanity
+  opusclip clip duplicate --project ID --clip CID Duplicate a clip
+  opusclip clip trim [options]                  Local ffmpeg trim
+  opusclip clip storyboard [options]            Generate frame grid
+  opusclip collection [list|clips|create|export|add-clip]
+  opusclip post [account list|copy create|copy get|create|schedule|cancel|list]
+  opusclip thumbnail create --url URL           Generate thumbnails
+  opusclip template list                        List brand templates
+  opusclip usage                                Show API cap usage
+  opusclip version                              Print version`);
+}
+
+async function handleProject(sub, flags) {
+  if (sub === "list") {
+    const page = flags.page || 0;
+    const pageSize = flags["page-size"] || 20;
+    const res = await apiRequest(`/clip-projects?page=${page}&pageSize=${pageSize}`);
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "create") {
+    let videoUrl = flags.url;
+    if (flags.file) {
+      console.error(JSON.stringify({ message: "Uploading local file..." }, null, 2));
+      const filePath = path.resolve(flags.file);
+      if (!fs.existsSync(filePath)) {
+        console.error(JSON.stringify({ error: `File not found: ${filePath}` }, null, 2));
+        process.exit(1);
+      }
+      const linkRes = await apiRequest("/upload-links", {
+        method: "POST",
+        body: { video: { usecase: "LocalUpload" } }
+      });
+      const uploadUrl = linkRes.url;
+      const uploadId = linkRes.uploadId;
+      
+      const fileBuffer = fs.readFileSync(filePath);
+      const sessionRes = await fetch(uploadUrl, {
+        method: "POST",
+        headers: {
+          "x-goog-resumable": "start",
+          "Content-Length": "0"
+        }
+      });
+      const location = sessionRes.headers.get("location");
+      if (!location) throw new Error("Failed to initiate resumable upload session");
+
+      await fetch(location, {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: fileBuffer
+      });
+      videoUrl = uploadId;
+    }
+
+    if (!videoUrl) {
+      console.error(JSON.stringify({ error: "--url or --file is required" }, null, 2));
+      process.exit(1);
+    }
+
+    const payload = { videoUrl };
+    if (flags.template) payload.brandTemplateId = flags.template;
+    if (flags.title) payload.uploadedVideoAttr = { title: flags.title };
+    
+    const curation = {};
+    if (flags.model) curation.model = flags.model;
+    if (flags.genre) curation.genre = flags.genre;
+    if (flags.prompt) curation.customPrompt = flags.prompt;
+    if (flags.keywords) curation.topicKeywords = flags.keywords.split(",").map(s => s.trim());
+    if (flags.durations) {
+      curation.clipDurations = flags.durations.split(",").map(d => [0, parseInt(d.trim(), 10)]);
+    }
+    if (flags["skip-curate"]) curation.skipCurate = true;
+    if (flags["skip-slicing"]) curation.skipSlicing = true;
+    if (flags["enable-auto-hook"]) curation.enableAutoHook = true;
+    if (flags["range-start"] && flags["range-end"]) {
+      curation.range = { startSec: parseFloat(flags["range-start"]), endSec: parseFloat(flags["range-end"]) };
+    }
+    if (Object.keys(curation).length > 0) payload.curationPref = curation;
+
+    const render = { layoutAspectRatio: flags.aspect || "portrait" };
+    if (flags["remove-filler"]) render.quickstartConfig = { enableRemoveFillerWords: true };
+    if (flags["enable-caption"] !== undefined) render.enableCaption = flags["enable-caption"] === "true" || flags["enable-caption"] === true;
+    payload.renderPref = render;
+
+    if (flags.lang) payload.importPreference = { sourceLang: flags.lang };
+    if (flags.webhook) payload.conclusionActions = [{ type: "WEBHOOK", url: flags.webhook }];
+
+    const res = await apiRequest("/clip-projects", {
+      method: "POST",
+      body: payload
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "share") {
+    const projectId = flags.project;
+    if (!projectId) {
+      console.error(JSON.stringify({ error: "--project is required" }, null, 2));
+      process.exit(1);
+    }
+    const res = await apiRequest(`/clip-projects/${projectId}/update-visibility`, {
+      method: "POST",
+      body: { visibility: "PUBLIC" }
+    });
+    console.log(JSON.stringify({
+      project_id: projectId,
+      visibility: "PUBLIC",
+      share_url: `${WEB_ORIGIN}/clip/${projectId}`,
+      ...res
+    }, null, 2));
+  } else if (sub === "transcript") {
+    const projectId = flags.project;
+    if (!projectId) {
+      console.error(JSON.stringify({ error: "--project is required" }, null, 2));
+      process.exit(1);
+    }
+    const res = await apiRequest(`/clip-projects/${projectId}/transcript`);
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "preview") {
+    const projectId = flags.project;
+    if (!projectId) {
+      console.error(JSON.stringify({ error: "--project is required" }, null, 2));
+      process.exit(1);
+    }
+    const clipsRes = await apiRequest(`/exportable-clips?q=findByProjectId&projectId=${projectId}`);
+    const clips = Array.isArray(clipsRes) ? clipsRes : (clipsRes.data?.list || clipsRes.list || []);
+    
+    let templatePath = path.resolve(__dirname, "../templates/preview.html");
+    if (!fs.existsSync(templatePath)) {
+      templatePath = path.resolve(__dirname, "../../templates/preview.html");
+    }
+    let html = fs.existsSync(templatePath) ? fs.readFileSync(templatePath, "utf8") : "<html><body><h1>Clips</h1>{{CLIP_CARDS}}</body></html>";
+    
+    let cards = clips.map((c, idx) => `
+      <div class="clip">
+        <video controls src="${c.uriForPreview || c.uriForExport || ''}" poster="${c.uriForThumbnail || ''}"></video>
+        <div class="clip-info">
+          <span class="clip-rank">#${c.rank || idx + 1}</span>
+          <span class="clip-score">Score: ${c.score || 'N/A'}</span>
+          <span class="clip-duration">${Math.round((c.durationMs || 0)/1000)}s</span>
+          <h2 class="clip-title">${c.title || 'Untitled Clip'}</h2>
+          <p class="clip-desc">${c.description || ''}</p>
+        </div>
+      </div>
+    `).join("\n");
+
+    html = html.replace(/{{PROJECT_TITLE}}/g, `Project ${projectId}`)
+               .replace(/{{CLIP_COUNT}}/g, String(clips.length))
+               .replace(/{{CLIP_CARDS}}/g, cards);
+
+    const outPath = flags.output || path.resolve(process.cwd(), `opusclip-preview-${projectId}.html`);
+    fs.writeFileSync(outPath, html, "utf8");
+    console.log(JSON.stringify({ preview_html: outPath, clip_count: clips.length }, null, 2));
+  } else {
+    printUsage();
+  }
+}
+
+async function handleClip(sub, flags, extra) {
+  if (sub === "list") {
+    const projectId = flags.project;
+    if (!projectId) {
+      console.error(JSON.stringify({ error: "--project is required" }, null, 2));
+      process.exit(1);
+    }
+    const res = await apiRequest(`/exportable-clips?q=findByProjectId&projectId=${projectId}`);
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "get") {
+    const projectId = flags.project;
+    const clipId = flags.clip;
+    if (!projectId || !clipId) {
+      console.error(JSON.stringify({ error: "--project and --clip are required" }, null, 2));
+      process.exit(1);
+    }
+    const res = await apiRequest(`/exportable-clips?q=findByProjectId&projectId=${projectId}`);
+    const clips = Array.isArray(res) ? res : (res.data?.list || res.list || []);
+    const match = clips.find(c => (c.id === `${projectId}.${clipId}` || c.id === clipId || (c.id && c.id.endsWith(clipId))));
+    if (!match) {
+      console.error(JSON.stringify({ error: `Clip ${clipId} not found in project ${projectId}` }, null, 2));
+      process.exit(1);
+    }
+    if (flags.transcript) {
+      console.log(JSON.stringify({ transcript: match.text || match.transcript }, null, 2));
+    } else if (flags.layout) {
+      console.log(JSON.stringify({ layout: match.renderPref }, null, 2));
+    } else {
+      console.log(JSON.stringify(match, null, 2));
+    }
+  } else if (sub === "export") {
+    const projectId = flags.project;
+    const clipId = flags.clip;
+    if (!projectId || !clipId) {
+      console.error(JSON.stringify({ error: "--project and --clip are required" }, null, 2));
+      process.exit(1);
+    }
+    const res = await apiRequest(`/exportable-clips/${projectId}.${clipId}`);
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "duplicate") {
+    const projectId = flags.project;
+    const clipId = flags.clip;
+    if (!projectId || !clipId) {
+      console.error(JSON.stringify({ error: "--project and --clip are required" }, null, 2));
+      process.exit(1);
+    }
+    const res = await apiRequest(`/exportable-clips/${projectId}.${clipId}/duplicate`, {
+      method: "POST"
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "edit") {
+    const editVerb = extra[0];
+    if (editVerb === "get") {
+      const projectId = flags.project;
+      const clipId = flags.clip;
+      const res = await apiRequest(`/exportable-clips/${projectId}.${clipId}?include=editingScript`);
+      if (flags.output) {
+        fs.writeFileSync(path.resolve(flags.output), JSON.stringify(res, null, 2));
+        console.log(JSON.stringify({ saved_to: flags.output }, null, 2));
+      } else {
+        console.log(JSON.stringify(res, null, 2));
+      }
+    } else if (editVerb === "apply") {
+      const scriptFile = flags.script;
+      if (!scriptFile || !fs.existsSync(scriptFile)) {
+        console.error(JSON.stringify({ error: "--script file is required" }, null, 2));
+        process.exit(1);
+      }
+      const script = JSON.parse(fs.readFileSync(scriptFile, "utf8"));
+      const res = await apiRequest(`/re-render`, {
+        method: "POST",
+        body: script
+      });
+      console.log(JSON.stringify(res, null, 2));
+    } else if (editVerb === "censor") {
+      const projectId = flags.project;
+      const clipId = flags.clip;
+      const res = await apiRequest(`/censor-jobs`, {
+        method: "POST",
+        body: {
+          projectId,
+          clipId,
+          options: { beepSound: !!flags.beep }
+        }
+      });
+      console.log(JSON.stringify(res, null, 2));
+    } else {
+      console.log(JSON.stringify({ message: "Use 'opusclip clip edit [ops|get|apply|censor]'" }, null, 2));
+    }
+  } else {
+    printUsage();
+  }
+}
+
+async function handleCollection(sub, flags) {
+  if (sub === "list") {
+    const res = await apiRequest("/collections?q=mine");
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "clips") {
+    const colId = flags.id;
+    const res = await apiRequest(`/exportable-clips?q=findByCollectionId&collectionId=${colId}`);
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "create") {
+    const name = flags.name || "New Collection";
+    const res = await apiRequest("/collections", {
+      method: "POST",
+      body: { collectionName: name }
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "export") {
+    const colId = flags.id;
+    const res = await apiRequest(`/collections/${colId}/export`, {
+      method: "POST",
+      body: {}
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "add-clip") {
+    const colId = flags.id;
+    const contentId = flags["content-id"];
+    const res = await apiRequest("/collection-contents", {
+      method: "POST",
+      body: { collectionId: colId, contentId }
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else {
+    printUsage();
+  }
+}
+
+async function handlePost(sub, flags, extra) {
+  if (sub === "account" && extra[0] === "list") {
+    const res = await apiRequest("/social-accounts?q=mine");
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "copy" && extra[0] === "create") {
+    const res = await apiRequest("/social-copy-jobs", {
+      method: "POST",
+      body: {
+        projectId: flags.project,
+        clipId: flags.clip,
+        postAccountId: flags.account,
+        prompt: flags.prompt
+      }
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "copy" && extra[0] === "get") {
+    const jobId = flags.job;
+    const res = await apiRequest(`/social-copy-jobs/${jobId}`);
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "create") {
+    const res = await apiRequest("/post-tasks", {
+      method: "POST",
+      body: {
+        projectId: flags.project,
+        clipId: flags.clip,
+        postAccountId: flags.account,
+        postDetail: {
+          title: flags.title || "Clip",
+          custom: {
+            description: flags.description || "",
+            privacy: flags.privacy || "public"
+          }
+        }
+      }
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "schedule") {
+    const res = await apiRequest("/publish-schedules", {
+      method: "POST",
+      body: {
+        projectId: flags.project,
+        clipId: flags.clip,
+        postAccountId: flags.account,
+        publishAt: flags.at,
+        postDetail: {
+          title: flags.title || "Clip",
+          custom: {
+            description: flags.description || "",
+            privacy: flags.privacy || "public"
+          }
+        }
+      }
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "cancel") {
+    const scheduleId = flags.schedule;
+    const res = await apiRequest(`/publish-schedules/${scheduleId}`, {
+      method: "DELETE"
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else if (sub === "list") {
+    const res = await apiRequest("/publish-schedules?q=mine");
+    console.log(JSON.stringify(res, null, 2));
+  } else {
+    printUsage();
+  }
+}
+
+async function handleThumbnail(sub, flags) {
+  if (sub === "create") {
+    const url = flags.url;
+    if (!url) {
+      console.error(JSON.stringify({ error: "--url is required" }, null, 2));
+      process.exit(1);
+    }
+    const res = await apiRequest("/generative-jobs", {
+      method: "POST",
+      body: {
+        jobType: "thumbnail",
+        sourceUri: url,
+        prompt: flags.prompt
+      }
+    });
+    console.log(JSON.stringify(res, null, 2));
+  } else {
+    printUsage();
+  }
+}
+
+async function handleTemplate(sub) {
+  if (sub === "list") {
+    const res = await apiRequest("/brand-templates?q=mine");
+    console.log(JSON.stringify(res, null, 2));
+  } else {
+    printUsage();
+  }
+}
+
+async function handleUsage() {
+  const res = await apiRequest("/api-usage?q=mine");
+  console.log(JSON.stringify(res, null, 2));
+}
+
+async function main() {
+  const rawArgs = process.argv.slice(2);
+  if (rawArgs.length === 0 || rawArgs.includes("--help") || rawArgs.includes("-h") || rawArgs[0] === "help") {
+    printUsage();
+    return;
+  }
+  if (rawArgs.includes("--version") || rawArgs.includes("-v") || rawArgs[0] === "version") {
+    console.log(VERSION);
+    return;
+  }
+
+  const resource = rawArgs[0];
+  const verb = rawArgs[1];
+  const { flags, positional } = parseArgs(rawArgs.slice(2));
+
+  switch (resource) {
+    case "project":
+      await handleProject(verb, flags);
+      break;
+    case "clip":
+      await handleClip(verb, flags, positional);
+      break;
+    case "collection":
+      await handleCollection(verb, flags);
+      break;
+    case "post":
+      await handlePost(verb, flags, positional);
+      break;
+    case "thumbnail":
+      await handleThumbnail(verb, flags);
+      break;
+    case "template":
+      await handleTemplate(verb);
+      break;
+    case "usage":
+      await handleUsage();
+      break;
+    default:
+      printUsage();
+      break;
+  }
+}
+
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
