@@ -2,6 +2,7 @@ import os
 import re
 import json
 import subprocess
+import requests
 from pathlib import Path
 from typing import Dict, Any, Callable, Optional
 
@@ -11,7 +12,7 @@ class VideoDownloader:
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.cookies_file = Path("cookies.txt")
 
-        # Support cookies passed via environment variable (useful on Railway)
+        # Optional cookies via environment variable on Railway
         env_cookies = os.environ.get("YOUTUBE_COOKIES", "")
         if env_cookies and not self.cookies_file.exists():
             with open(self.cookies_file, "w", encoding="utf-8") as f:
@@ -28,24 +29,31 @@ class VideoDownloader:
             return f"https://www.youtube.com/watch?v={video_id}"
         return url
 
+    def get_video_id(self, url: str) -> str:
+        clean_u = self.clean_url(url)
+        if "watch?v=" in clean_u:
+            return clean_u.split("watch?v=")[1].split("&")[0]
+        return "video"
+
     def sanitize_filename(self, name: str) -> str:
         return re.sub(r'[\\/*?:"<>|]', "", name).strip()[:80]
 
     def _get_base_ydl_opts(self) -> dict:
-        """Base options with cloud bot-protection bypasses for Railway/servers."""
+        """Cloud datacenter bypass options for Railway."""
         opts = {
             'quiet': True,
             'no_warnings': True,
             'socket_timeout': 30,
             'retries': 10,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 14; Pixel 7 Pro) gzip',
                 'Accept-Language': 'en-US,en;q=0.9',
             },
-            # Use iOS/Android/Creator player clients to bypass YouTube datacenter bot detection
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['ios', 'android', 'web_creator', 'tv_embedded'],
+                    # android_testsuite & tv bypass YouTube bot checks on cloud datacenter IPs
+                    'player_client': ['android_testsuite', 'android', 'tv_embedded', 'mweb'],
+                    'player_skip': ['webpage', 'configs'],
                 }
             }
         }
@@ -53,9 +61,36 @@ class VideoDownloader:
             opts['cookiefile'] = str(self.cookies_file.resolve())
         return opts
 
+    def get_info_fallback_invidious(self, video_id: str) -> Optional[Dict[str, Any]]:
+        """Fallback metadata fetch via open Invidious instances if yt-dlp gets IP-blocked."""
+        instances = [
+            "https://inv.tux.pizza",
+            "https://invidious.nerdvpn.de",
+            "https://invidious.jing.rocks",
+            "https://vid.puffyan.us"
+        ]
+        for inst in instances:
+            try:
+                res = requests.get(f"{inst}/api/v1/videos/{video_id}", timeout=6)
+                if res.status_code == 200:
+                    data = res.json()
+                    return {
+                        'id': video_id,
+                        'title': data.get('title', 'YouTube Video'),
+                        'duration': data.get('lengthSeconds', 0),
+                        'thumbnail': data.get('videoThumbnails', [{}])[0].get('url', ''),
+                        'uploader': data.get('author', ''),
+                        'description': data.get('description', '')[:300]
+                    }
+            except Exception:
+                continue
+        return None
+
     def get_info(self, url: str) -> Dict[str, Any]:
         """Fetch metadata without downloading."""
         clean_u = self.clean_url(url)
+        video_id = self.get_video_id(clean_u)
+
         try:
             import yt_dlp
             ydl_opts = self._get_base_ydl_opts()
@@ -64,7 +99,7 @@ class VideoDownloader:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(clean_u, download=False)
                 return {
-                    'id': info.get('id', 'video'),
+                    'id': info.get('id', video_id),
                     'title': info.get('title', 'YouTube Video'),
                     'duration': info.get('duration', 0),
                     'thumbnail': info.get('thumbnail', ''),
@@ -72,11 +107,11 @@ class VideoDownloader:
                     'description': info.get('description', '')[:300]
                 }
         except Exception as e:
+            # Fallback 1: Try CLI with explicit android client
             try:
-                # CLI fallback with client args
                 cmd = [
                     "yt-dlp", "-J", "--no-warnings",
-                    "--extractor-args", "youtube:player_client=ios,android,web_creator",
+                    "--extractor-args", "youtube:player_client=android_testsuite,android,mweb",
                     clean_u
                 ]
                 if self.cookies_file.exists():
@@ -85,15 +120,19 @@ class VideoDownloader:
                 res = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 info = json.loads(res.stdout)
                 return {
-                    'id': info.get('id', 'video'),
+                    'id': info.get('id', video_id),
                     'title': info.get('title', 'YouTube Video'),
                     'duration': info.get('duration', 0),
                     'thumbnail': info.get('thumbnail', ''),
                     'uploader': info.get('uploader', ''),
                     'description': info.get('description', '')[:300]
                 }
-            except Exception as sub_e:
-                raise RuntimeError(f"Failed to extract video information: {str(e)} / {str(sub_e)}")
+            except Exception:
+                # Fallback 2: Invidious API
+                inv_info = self.get_info_fallback_invidious(video_id)
+                if inv_info:
+                    return inv_info
+                raise RuntimeError(f"Could not connect to YouTube stream: {str(e)}")
 
     def download(self, url: str, progress_callback: Optional[Callable[[str, float], None]] = None) -> Dict[str, Any]:
         """Download fast 1080p/720p MP4 video and separate 16kHz audio track."""
@@ -112,7 +151,7 @@ class VideoDownloader:
         # If already downloaded, reuse
         if os.path.exists(video_path) and os.path.exists(audio_path):
             if progress_callback:
-                progress_callback("Video already cached locally.", 20)
+                progress_callback("Video already cached.", 20)
             return {
                 **info,
                 'video_path': video_path,
@@ -126,7 +165,7 @@ class VideoDownloader:
                 if d['status'] == 'downloading' and progress_callback:
                     total = d.get('total_bytes') or d.get('total_bytes_estimate') or 1
                     downloaded = d.get('downloaded_bytes', 0)
-                    pct = (downloaded / total) * 15 + 5 # Scale to 5%-20%
+                    pct = (downloaded / total) * 15 + 5
                     speed = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', d.get('_speed_str', '')).strip()
                     speed_display = f" ({speed})" if speed else ""
                     progress_callback(f"Downloading video... {pct:.1f}%{speed_display}", pct)
@@ -165,7 +204,7 @@ class VideoDownloader:
 
             # Extract audio for speech transcription
             if progress_callback:
-                progress_callback("Extracting audio track for speech recognition...", 22)
+                progress_callback("Extracting audio for speech recognition...", 22)
 
             self.extract_audio(video_path, audio_path)
 
@@ -177,11 +216,11 @@ class VideoDownloader:
 
         except Exception as e:
             if progress_callback:
-                progress_callback("Retrying with mobile client stream...", 10)
+                progress_callback("Retrying with mobile streaming client...", 10)
             
             cmd = [
                 "yt-dlp",
-                "--extractor-args", "youtube:player_client=ios,android,web_creator",
+                "--extractor-args", "youtube:player_client=android_testsuite,android,mweb",
                 "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
                 "--merge-output-format", "mp4",
                 "-o", output_template,
